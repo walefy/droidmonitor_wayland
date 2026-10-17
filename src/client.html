@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>DroidMonitor Wayland</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      touch-action: none;
+    }
+    html, body {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: #080a0f;
+      color: #f0f4f8;
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+    #screen {
+      width: 100vw;
+      height: 100vh;
+      display: block;
+      object-fit: fill;
+      background: #000;
+    }
+    #overlay {
+      position: fixed;
+      inset: 0;
+      background: radial-gradient(circle at center, #141b2d 0%, #070a10 100%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 20;
+      padding: 24px;
+      text-align: center;
+      transition: opacity 0.25s ease;
+    }
+    #overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .card {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 20px;
+      padding: 32px 28px;
+      max-width: 420px;
+      width: 100%;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+    }
+    h1 {
+      font-size: 1.5rem;
+      margin-bottom: 8px;
+      color: #4cc9f0;
+    }
+    p {
+      font-size: 0.95rem;
+      color: #94a3b8;
+      margin-bottom: 24px;
+      line-height: 1.4;
+    }
+    .hint {
+      font-size: 0.8rem;
+      color: #64748b;
+      margin-top: 14px;
+    }
+    .btn-start {
+      background: linear-gradient(135deg, #3b82f6, #06b6d4);
+      color: #fff;
+      border: none;
+      border-radius: 14px;
+      padding: 16px 24px;
+      font-size: 1.1rem;
+      font-weight: 700;
+      width: 100%;
+      cursor: pointer;
+      box-shadow: 0 8px 25px rgba(6, 182, 212, 0.35);
+    }
+    .btn-start:active {
+      transform: scale(0.98);
+    }
+    #hud {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      z-index: 10;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      transition: opacity 0.25s ease, transform 0.25s ease;
+      opacity: 0.92;
+    }
+    /* When hidden or auto-dimmed, pointer-events: none ensures 100% click-through! */
+    #hud.hidden-hud {
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(-8px);
+    }
+    #hud button {
+      background: rgba(255, 255, 255, 0.14);
+      color: #fff;
+      border: none;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    #hud button.close-btn {
+      background: rgba(239, 68, 68, 0.28);
+      padding: 4px 8px;
+      font-weight: 700;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #ef4444;
+    }
+    .dot.connected {
+      background: #22c55e;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="screen"></canvas>
+
+  <div id="hud">
+    <div id="status-dot" class="dot"></div>
+    <span id="fps-label">0 FPS</span>
+    <button id="btn-fs" type="button">Tela Cheia</button>
+    <button id="btn-fit" type="button">Preencher</button>
+    <button id="btn-hide" class="close-btn" type="button" title="Ocultar menu (Toque com 3 dedos para reabrir)">✕</button>
+  </div>
+
+  <div id="overlay">
+    <div class="card">
+      <h1>DroidMonitor Wayland</h1>
+      <p>Segundo monitor virtual com suporte a Multi-Touch para COSMIC Desktop.</p>
+      <button id="start-btn" class="btn-start" type="button">
+        🚀 Ativar Monitor em Tela Cheia
+      </button>
+      <div class="hint">
+        💡 Dica: O menu de FPS some sozinho (ou clicando no ✕) e não bloqueia cliques. Toque com <b>3 dedos</b> na tela quando quiser reabri-lo.
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('screen');
+    const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+    const overlay = document.getElementById('overlay');
+    const startBtn = document.getElementById('start-btn');
+    const statusDot = document.getElementById('status-dot');
+    const fpsLabel = document.getElementById('fps-label');
+    const hud = document.getElementById('hud');
+    const btnFs = document.getElementById('btn-fs');
+    const btnFit = document.getElementById('btn-fit');
+    const btnHide = document.getElementById('btn-hide');
+
+    const ACK_PACKET = new Uint8Array([0xFF, 0, 0, 0]);
+    const TARGET_ORIENTATION = '__TARGET_ORIENTATION__';
+
+    let ws = null;
+    let wakeLock = null;
+    let frameCount = 0;
+    let currentFps = 0;
+    let lastDecodeMs = 0;
+    let inFlightDecodes = 0;
+    let drawChain = Promise.resolve();
+    let lastFpsTime = performance.now();
+    let hudTimer = null;
+    let stretchFill = true;
+
+    function sendAck() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ACK_PACKET[0] = 0xFF;
+        ACK_PACKET[1] = Math.min(255, Math.round(lastDecodeMs));
+        ACK_PACKET[2] = Math.min(255, currentFps);
+        ACK_PACKET[3] = Math.min(255, inFlightDecodes);
+        ws.send(ACK_PACKET);
+      }
+    }
+
+    const activeSlots = new Map();
+    const usedSlots = new Array(10).fill(false);
+
+    function allocSlot(id) {
+      if (activeSlots.has(id)) return activeSlots.get(id);
+      for (let i = 0; i < 10; i++) {
+        if (!usedSlots[i]) {
+          usedSlots[i] = true;
+          activeSlots.set(id, i);
+          return i;
+        }
+      }
+      return 0;
+    }
+
+    function freeSlot(id) {
+      if (!activeSlots.has(id)) return 0;
+      const slot = activeSlots.get(id);
+      activeSlots.delete(id);
+      usedSlots[slot] = false;
+      return slot;
+    }
+
+    async function requestWakeLock() {
+      if ('wakeLock' in navigator) {
+        try {
+          wakeLock = await navigator.wakeLock.request('screen');
+        } catch (_) {}
+      }
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') requestWakeLock();
+    });
+
+    async function enterFullscreen() {
+      try {
+        if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+          await document.documentElement.requestFullscreen({ navigationUI: 'hide' });
+        }
+        if (screen.orientation && screen.orientation.lock) {
+          const mode = (TARGET_ORIENTATION === 'portrait' || (canvas.height > canvas.width && canvas.width > 0))
+            ? 'portrait'
+            : 'landscape';
+          await screen.orientation.lock(mode).catch(() => {});
+        }
+      } catch (_) {}
+    }
+
+    function showHudTemporarily() {
+      hud.classList.remove('hidden-hud');
+      clearTimeout(hudTimer);
+      hudTimer = setTimeout(() => hud.classList.add('hidden-hud'), 3500);
+    }
+
+    function hideHudImmediately() {
+      clearTimeout(hudTimer);
+      hud.classList.add('hidden-hud');
+    }
+
+    btnFs.addEventListener('click', (e) => {
+      e.stopPropagation();
+      enterFullscreen();
+      showHudTemporarily();
+    });
+
+    btnFit.addEventListener('click', (e) => {
+      e.stopPropagation();
+      stretchFill = !stretchFill;
+      canvas.style.objectFit = stretchFill ? 'fill' : 'contain';
+      btnFit.textContent = stretchFill ? 'Preencher' : 'Proporção';
+      showHudTemporarily();
+    });
+
+    btnHide.addEventListener('click', (e) => {
+      e.stopPropagation();
+      hideHudImmediately();
+    });
+
+    startBtn.addEventListener('click', async () => {
+      overlay.classList.add('hidden');
+      await enterFullscreen();
+      await requestWakeLock();
+      showHudTemporarily();
+      connectWebSocket();
+    });
+
+    function renderFrame(buffer) {
+      if (buffer.byteLength < 8) {
+        sendAck();
+        return;
+      }
+
+      const view = new DataView(buffer);
+      let fullW = 0;
+      let fullH = 0;
+      const items = [];
+
+      // Header magic 'DM' = [0x44, 0x4D]
+      if (view.getUint8(0) === 0x44 && view.getUint8(1) === 0x4D) {
+        const numRects = view.getUint8(2);
+        // const flags = view.getUint8(3);
+        fullW = view.getUint16(4, true);
+        fullH = view.getUint16(6, true);
+
+        let offset = 8;
+        for (let i = 0; i < numRects; i++) {
+          if (offset + 12 > buffer.byteLength) break;
+          const rx = view.getUint16(offset, true);
+          const ry = view.getUint16(offset + 2, true);
+          const rw = view.getUint16(offset + 4, true);
+          const rh = view.getUint16(offset + 6, true);
+          const dataLen = view.getUint32(offset + 8, true);
+          offset += 12;
+
+          if (offset + dataLen > buffer.byteLength) break;
+          const jpegSlice = new Uint8Array(buffer, offset, dataLen);
+          offset += dataLen;
+
+          const blob = new Blob([jpegSlice], { type: 'image/jpeg' });
+          // Launch parallel C++ JPEG decodes across Chrome's worker pool!
+          const bmpPromise = createImageBitmap(blob, {
+            premultiplyAlpha: 'none',
+            colorSpaceConversion: 'none',
+          });
+          items.push({ rx, ry, rw, rh, bmpPromise });
+        }
+      } else {
+        // Fallback for legacy single-rect format
+        const rx = view.getUint16(0, true);
+        const ry = view.getUint16(2, true);
+        fullW = view.getUint16(4, true);
+        fullH = view.getUint16(6, true);
+        const blob = new Blob([new Uint8Array(buffer, 8)], { type: 'image/jpeg' });
+        const bmpPromise = createImageBitmap(blob, {
+          premultiplyAlpha: 'none',
+          colorSpaceConversion: 'none',
+        });
+        items.push({ rx, ry, rw: fullW, rh: fullH, bmpPromise });
+      }
+
+      if (items.length === 0) {
+        sendAck();
+        return;
+      }
+
+      inFlightDecodes++;
+      const t0 = performance.now();
+
+      drawChain = drawChain.then(async () => {
+        let decoded = [];
+        try {
+          decoded = await Promise.all(
+            items.map(async (item) => ({
+              rx: item.rx,
+              ry: item.ry,
+              bmp: await item.bmpPromise,
+            }))
+          );
+          lastDecodeMs = performance.now() - t0;
+
+          if (fullW > 0 && fullH > 0 && (canvas.width !== fullW || canvas.height !== fullH)) {
+            canvas.width = fullW;
+            canvas.height = fullH;
+          }
+
+          for (const item of decoded) {
+            ctx.drawImage(item.bmp, item.rx, item.ry);
+          }
+
+          frameCount++;
+          const now = performance.now();
+          if (now - lastFpsTime >= 1000) {
+            currentFps = frameCount;
+            fpsLabel.textContent = `${frameCount} FPS`;
+            frameCount = 0;
+            lastFpsTime = now;
+          }
+        } catch (_) {
+        } finally {
+          for (const item of decoded) {
+            if (item.bmp && typeof item.bmp.close === 'function') {
+              item.bmp.close();
+            }
+          }
+          inFlightDecodes--;
+          sendAck();
+        }
+      });
+    }
+
+    function connectWebSocket() {
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${proto}//${location.host}/ws`);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = () => {
+        statusDot.classList.add('connected');
+      };
+
+      ws.onmessage = (ev) => {
+        if (ev.data instanceof ArrayBuffer) {
+          renderFrame(ev.data);
+        }
+      };
+
+      ws.onclose = () => {
+        statusDot.classList.remove('connected');
+        setTimeout(connectWebSocket, 800);
+      };
+
+      ws.onerror = () => {
+        ws.close();
+      };
+    }
+
+    const TOUCH_PKT = new Uint8Array(6);
+    let cachedRect = canvas.getBoundingClientRect();
+    const lastMoveSentAt = new Float64Array(10);
+
+    // Anti-Jitter Tap Deadzone & Magnetic Double-Tap Stabilizer
+    const TAP_DEADZONE_PX = 16;
+    const DOUBLE_TAP_MS = 450;
+    const DOUBLE_TAP_RADIUS_PX = 48;
+    const MIN_TAP_HOLD_MS = 24;
+    const MIN_TAP_GAP_MS = 24;
+
+    const slotStartX = new Float64Array(10);
+    const slotStartY = new Float64Array(10);
+    const slotIsDragging = new Uint8Array(10);
+    const slotDownSentAt = new Float64Array(10);
+    const slotPendingDownTimer = new Array(10).fill(null);
+    const slotPendingUpTimer = new Array(10).fill(null);
+
+    let lastTapTime = 0;
+    let lastTapX = -1000;
+    let lastTapY = -1000;
+    let lastUpSentAt = 0;
+
+    function updateCanvasRect() {
+      cachedRect = canvas.getBoundingClientRect();
+    }
+    window.addEventListener('resize', updateCanvasRect);
+    document.addEventListener('fullscreenchange', updateCanvasRect);
+
+    function sendTouchPacket(action, slot, clientX, clientY) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (action === 1) {
+        const now = performance.now();
+        if (now - lastMoveSentAt[slot] < 8) return;
+        lastMoveSentAt[slot] = now;
+      }
+
+      const rect = cachedRect.width > 0 ? cachedRect : (cachedRect = canvas.getBoundingClientRect());
+      let normX = (clientX - rect.left) / Math.max(1, rect.width);
+      let normY = (clientY - rect.top) / Math.max(1, rect.height);
+
+      if (!stretchFill && canvas.width > 0 && canvas.height > 0) {
+        const videoAspect = canvas.width / canvas.height;
+        const rectAspect = rect.width / rect.height;
+        if (rectAspect > videoAspect) {
+          const renderW = rect.height * videoAspect;
+          const offsetX = (rect.width - renderW) / 2;
+          normX = (clientX - rect.left - offsetX) / renderW;
+        } else {
+          const renderH = rect.width / videoAspect;
+          const offsetY = (rect.top + (rect.height - renderH) / 2);
+          normY = (clientY - offsetY) / renderH;
+        }
+      }
+
+      const x16 = Math.max(0, Math.min(32767, Math.round(normX * 32767)));
+      const y16 = Math.max(0, Math.min(32767, Math.round(normY * 32767)));
+
+      TOUCH_PKT[0] = action;
+      TOUCH_PKT[1] = slot & 0xFF;
+      TOUCH_PKT[2] = x16 & 0xFF;
+      TOUCH_PKT[3] = (x16 >> 8) & 0xFF;
+      TOUCH_PKT[4] = y16 & 0xFF;
+      TOUCH_PKT[5] = (y16 >> 8) & 0xFF;
+      ws.send(TOUCH_PKT);
+    }
+
+    function flushSlotTimers(slot) {
+      if (slotPendingDownTimer[slot] !== null) {
+        clearTimeout(slotPendingDownTimer[slot].timerId);
+        slotPendingDownTimer[slot].flush();
+        slotPendingDownTimer[slot] = null;
+      }
+      if (slotPendingUpTimer[slot] !== null) {
+        clearTimeout(slotPendingUpTimer[slot].timerId);
+        slotPendingUpTimer[slot].flush();
+        slotPendingUpTimer[slot] = null;
+      }
+    }
+
+    // Touch Events (Multi-Touch up to 10 fingers; 3-finger tap toggles HUD visibility)
+    canvas.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      updateCanvasRect();
+      if (e.touches.length === 3) {
+        if (hud.classList.contains('hidden-hud')) {
+          showHudTemporarily();
+        } else {
+          hideHudImmediately();
+        }
+        return;
+      }
+
+      const now = performance.now();
+      for (const t of e.changedTouches) {
+        const slot = allocSlot(t.identifier);
+        flushSlotTimers(slot);
+
+        let startX = t.clientX;
+        let startY = t.clientY;
+
+        // Magnetic Double-Tap Snapping: if tapping single-finger within 450ms and 48px of last tap,
+        // lock to the exact pixel coordinate of the first tap so the desktop registers a 100% clean double-click!
+        if (
+          e.touches.length === 1 &&
+          now - lastTapTime <= DOUBLE_TAP_MS &&
+          Math.hypot(startX - lastTapX, startY - lastTapY) <= DOUBLE_TAP_RADIUS_PX
+        ) {
+          startX = lastTapX;
+          startY = lastTapY;
+        }
+
+        slotStartX[slot] = startX;
+        slotStartY[slot] = startY;
+        slotIsDragging[slot] = 0;
+
+        const sinceLastUp = performance.now() - lastUpSentAt;
+        if (slot === 0 && sinceLastUp < MIN_TAP_GAP_MS) {
+          const waitGap = MIN_TAP_GAP_MS - sinceLastUp;
+          slotDownSentAt[slot] = performance.now() + waitGap;
+          const sx = startX;
+          const sy = startY;
+          const flushDown = () => {
+            slotPendingDownTimer[slot] = null;
+            sendTouchPacket(0, slot, sx, sy);
+          };
+          const timerId = setTimeout(flushDown, waitGap);
+          slotPendingDownTimer[slot] = { timerId, flush: flushDown };
+        } else {
+          slotDownSentAt[slot] = performance.now();
+          sendTouchPacket(0, slot, startX, startY);
+        }
+      }
+    }, { passive: false });
+
+    canvas.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+      for (const t of e.changedTouches) {
+        const slot = allocSlot(t.identifier);
+        if (!slotIsDragging[slot]) {
+          const dist = Math.hypot(t.clientX - slotStartX[slot], t.clientY - slotStartY[slot]);
+          // Ignore micro finger roll (< 16px) so taps and double-taps never turn into micro-drags!
+          if (dist < TAP_DEADZONE_PX) {
+            continue;
+          }
+          slotIsDragging[slot] = 1;
+          if (slotPendingDownTimer[slot] !== null) {
+            clearTimeout(slotPendingDownTimer[slot].timerId);
+            slotPendingDownTimer[slot].flush();
+            slotPendingDownTimer[slot] = null;
+          }
+        }
+        sendTouchPacket(1, slot, t.clientX, t.clientY);
+      }
+    }, { passive: false });
+
+    function finishTouchSlot(t, actionCode) {
+      const slot = freeSlot(t.identifier);
+      const wasTap = !slotIsDragging[slot] && actionCode === 2;
+      const finalX = wasTap ? slotStartX[slot] : t.clientX;
+      const finalY = wasTap ? slotStartY[slot] : t.clientY;
+
+      if (wasTap) {
+        lastTapTime = performance.now();
+        lastTapX = finalX;
+        lastTapY = finalY;
+      }
+
+      const holdElapsed = performance.now() - slotDownSentAt[slot];
+      if (wasTap && holdElapsed < MIN_TAP_HOLD_MS) {
+        const remaining = MIN_TAP_HOLD_MS - holdElapsed;
+        const flushFn = () => {
+          if (slotPendingDownTimer[slot] !== null) {
+            clearTimeout(slotPendingDownTimer[slot].timerId);
+            slotPendingDownTimer[slot].flush();
+            slotPendingDownTimer[slot] = null;
+          }
+          slotPendingUpTimer[slot] = null;
+          lastUpSentAt = performance.now();
+          sendTouchPacket(actionCode, slot, finalX, finalY);
+        };
+        const timerId = setTimeout(flushFn, remaining);
+        slotPendingUpTimer[slot] = { timerId, flush: flushFn };
+      } else {
+        if (slotPendingDownTimer[slot] !== null) {
+          clearTimeout(slotPendingDownTimer[slot].timerId);
+          slotPendingDownTimer[slot].flush();
+          slotPendingDownTimer[slot] = null;
+        }
+        lastUpSentAt = performance.now();
+        sendTouchPacket(actionCode, slot, finalX, finalY);
+      }
+    }
+
+    canvas.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      for (const t of e.changedTouches) {
+        finishTouchSlot(t, 2);
+      }
+    }, { passive: false });
+
+    canvas.addEventListener('touchcancel', (e) => {
+      e.preventDefault();
+      for (const t of e.changedTouches) {
+        finishTouchSlot(t, 3);
+      }
+    }, { passive: false });
+
+    let mouseDown = false;
+    canvas.addEventListener('mousedown', (e) => {
+      mouseDown = true;
+      sendTouchPacket(0, 0, e.clientX, e.clientY);
+    });
+    canvas.addEventListener('mousemove', (e) => {
+      if (!mouseDown) return;
+      sendTouchPacket(1, 0, e.clientX, e.clientY);
+    });
+    window.addEventListener('mouseup', (e) => {
+      if (!mouseDown) return;
+      mouseDown = false;
+      sendTouchPacket(2, 0, e.clientX, e.clientY);
+    });
+  </script>
+</body>
+</html>
