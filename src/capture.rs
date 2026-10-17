@@ -194,6 +194,7 @@ pub struct ClientDiagnostics {
     pub client_fps: std::sync::atomic::AtomicU32,
     pub queue_len: std::sync::atomic::AtomicU32,
     pub lagged_events: std::sync::atomic::AtomicU32,
+    pub active_connections: std::sync::atomic::AtomicU32,
 }
 
 #[derive(Clone, Debug)]
@@ -812,8 +813,22 @@ pub fn run_wayland_capture_loop(
                     let n = stat_wayland_frames.max(1) as u64;
                     let p = stat_sent_packets.max(1) as u64;
                     let rc = stat_rect_count.max(1);
+                    let is_cli_connected = diagnostics.active_connections.load(Ordering::Relaxed) > 0;
+                    let android_stat = if is_cli_connected {
+                        format!(
+                            "{}fps (ACKs {:.0}/s, decode {}ms, fila {}, lag {})",
+                            cli_fps,
+                            acks as f64 / elapsed_s,
+                            dec_ms,
+                            q_len,
+                            lags
+                        )
+                    } else {
+                        "desconectado (aguardando cliente...)".to_string()
+                    };
+
                     eprintln!(
-                        "📊 [Diagnóstico] Wayland: {:.0}fps (wait {:.1}ms) | Dirty: {:.0}pkt/s ({:.1} rects/p, avg {}x{}, {:.1}KB, enc {:.2}ms) | Android: {}fps (ACKs {:.0}/s, decode {}ms, fila {}, lag {})",
+                        "📊 [Diagnóstico] Wayland: {:.0}fps (wait {:.1}ms) | Dirty: {:.0}pkt/s ({:.1} rects/p, avg {}x{}, {:.1}KB, enc {:.2}ms) | Android: {}",
                         stat_wayland_frames as f64 / elapsed_s,
                         (stat_wait_us / n) as f64 / 1000.0,
                         stat_sent_packets as f64 / elapsed_s,
@@ -822,11 +837,7 @@ pub fn run_wayland_capture_loop(
                         stat_rect_h / rc,
                         (stat_bytes as f64 / p as f64) / 1024.0,
                         (stat_enc_us / n) as f64 / 1000.0,
-                        cli_fps,
-                        acks as f64 / elapsed_s,
-                        dec_ms,
-                        q_len,
-                        lags
+                        android_stat
                     );
                 }
                 stat_wayland_frames = 0;

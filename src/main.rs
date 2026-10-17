@@ -282,15 +282,17 @@ async fn main() -> Result<()> {
     // 7. Iniciar servidor HTTP + WebSocket e abrir túnel USB no Android
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let server_port = cli.port;
+    let server_diag = diagnostics.clone();
+    let server_shutdown = shutdown_rx.clone();
     let server_task = tokio::spawn(async move {
         let _ = server::run_http_ws_server(
             server_port,
             is_landscape,
             packet_tx,
             latest_keyframe,
-            diagnostics,
+            server_diag,
             touch_dev,
-            shutdown_rx,
+            server_shutdown,
         )
         .await;
     });
@@ -312,6 +314,86 @@ async fn main() -> Result<()> {
                 eprintln!("⚠ Aviso ao abrir navegador via ADB: {}", e);
             }
         }
+
+        // Watchdog de Auto-Reconexão USB:
+        // Se o cabo USB for desconectado ou sofrer mau contato, aguarda o retorno do dispositivo
+        // e restaura o túnel `adb reverse` automaticamente sem derrubar o monitor virtual no COSMIC.
+        let watchdog_adb = adb_ctrl.clone();
+        let watchdog_serial = dev.serial.clone();
+        let watchdog_model = dev.model.clone();
+        let watchdog_port = cli.port;
+        let mut watchdog_shutdown = shutdown_rx.clone();
+
+        tokio::spawn(async move {
+            let mut was_disconnected = false;
+
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(1200)) => {},
+                    _ = watchdog_shutdown.changed() => {
+                        break;
+                    }
+                }
+
+                let adb_clone = watchdog_adb.clone();
+                let serial_clone = watchdog_serial.clone();
+
+                // Verifica diretamente no ADB se o túnel reverso ainda existe
+                let is_tunnel_ok = tokio::task::spawn_blocking({
+                    let adb = adb_clone.clone();
+                    let serial = serial_clone.clone();
+                    move || adb.is_reverse_tunnel_active(&serial, watchdog_port)
+                })
+                .await
+                .unwrap_or(false);
+
+                if is_tunnel_ok {
+                    if was_disconnected {
+                        println!(
+                            "\n{} Conexão USB restaurada no {}! Túnel ADB reativado.",
+                            style("🔄 [Auto-Reconnect]").green().bold(),
+                            style(&watchdog_model).magenta().bold()
+                        );
+                        was_disconnected = false;
+                    }
+                } else {
+                    // Túnel ausente: checar se o aparelho está fisicamente conectado
+                    let is_connected = tokio::task::spawn_blocking({
+                        let adb = adb_clone.clone();
+                        let serial = serial_clone.clone();
+                        move || adb.is_device_connected(&serial)
+                    })
+                    .await
+                    .unwrap_or(false);
+
+                    if is_connected {
+                        // Aparelho conectado mas sem o túnel: recriar o túnel sem abrir uma nova aba
+                        let adb_setup = watchdog_adb.clone();
+                        let serial_setup = watchdog_serial.clone();
+                        let res = tokio::task::spawn_blocking(move || {
+                            adb_setup.setup_reverse_tunnel(&serial_setup, watchdog_port)
+                        })
+                        .await;
+
+                        if let Ok(Ok(_)) = res {
+                            println!(
+                                "\n{} Conexão USB restaurada no {}! Túnel ADB reativado.",
+                                style("🔄 [Auto-Reconnect]").green().bold(),
+                                style(&watchdog_model).magenta().bold()
+                            );
+                            was_disconnected = false;
+                        }
+                    } else if !was_disconnected {
+                        was_disconnected = true;
+                        println!(
+                            "\n{} Conexão USB com {} interrompida (aguardando reconexão do cabo)...",
+                            style("⚡ [USB Desconectado]").yellow().bold(),
+                            style(&watchdog_model).magenta().bold()
+                        );
+                    }
+                }
+            }
+        });
     }
 
     let local_ips = discover_local_ipv4s();

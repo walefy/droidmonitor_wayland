@@ -12,7 +12,8 @@ Transforme qualquer celular ou tablet Android conectado via cabo USB em um segun
 - **Emulação real de Multi-Touch:** Cria um dispositivo de toque no kernel via `/dev/uinput` (até 10 toques simultâneos) e mapeia as coordenadas diretamente para a saída virtual no COSMIC.
 - **Multi-Bounding-Boxes (Delta inteligente):** Grid de 64x64 com refinamento por pixel. O sistema só comprime e transmite as regiões que realmente mudaram na tela, reduzindo drasticamente o uso de banda e entregando **60 FPS com 2 a 3ms de decodificação**.
 - **Plug & Play via USB:** Detecta o celular conectado, configura o túnel com `adb reverse`, lê a resolução do aparelho e abre o navegador no Android em tela cheia automaticamente.
-- **Limpeza completa ao sair:** Ao apertar `Ctrl+C` ou desconectar o cabo, o monitor virtual é desfeito, as configurações do COSMIC são restauradas e o dispositivo de toque é removido.
+- **Auto-Reconexão USB Plug & Play:** Se você esbarrar no cabo ou houver mau contato, o monitor virtual e as janelas no COSMIC continuam intactos. O watchdog detecta o retorno do cabo e reativa o túnel ADB automaticamente em background com consumo zero de CPU durante o uso normal.
+- **Limpeza completa ao sair:** Ao apertar `Ctrl+C`, o monitor virtual é desfeito, as configurações do COSMIC são restauradas e o dispositivo de toque é removido.
 
 ---
 

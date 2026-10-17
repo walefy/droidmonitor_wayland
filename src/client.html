@@ -195,6 +195,11 @@
       }
     }
 
+    // Periodic 1-second heartbeat so server detects cable disconnection immediately even if screen is idle
+    setInterval(() => {
+      sendAck();
+    }, 1000);
+
     const activeSlots = new Map();
     const usedSlots = new Array(10).fill(false);
 

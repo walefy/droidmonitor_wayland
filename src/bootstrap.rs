@@ -296,7 +296,30 @@ impl AdbController {
         None
     }
 
-    pub fn setup_usb_tunnel_and_open_browser(&self, serial: &str, port: u16) -> Result<()> {
+    /// Checks if the given Android device is currently connected and in the `device` state via ADB.
+    pub fn is_device_connected(&self, serial: &str) -> bool {
+        let Ok(out) = Command::new(&self.adb_bin)
+            .args(["-s", serial, "get-state"])
+            .output() else {
+                return false;
+            };
+        let s = String::from_utf8_lossy(&out.stdout);
+        s.trim() == "device"
+    }
+
+    /// Checks if the ADB reverse tunnel for the specified port is active on the device.
+    pub fn is_reverse_tunnel_active(&self, serial: &str, port: u16) -> bool {
+        let Ok(out) = Command::new(&self.adb_bin)
+            .args(["-s", serial, "reverse", "--list"])
+            .output() else {
+                return false;
+            };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let target = format!("tcp:{}", port);
+        text.contains(&target)
+    }
+
+    pub fn setup_reverse_tunnel(&self, serial: &str, port: u16) -> Result<()> {
         let tcp_spec = format!("tcp:{}", port);
         let status = Command::new(&self.adb_bin)
             .args(["-s", serial, "reverse", &tcp_spec, &tcp_spec])
@@ -311,6 +334,12 @@ impl AdbController {
         let _ = Command::new(&self.adb_bin)
             .args(["-s", serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP"])
             .output();
+
+        Ok(())
+    }
+
+    pub fn setup_usb_tunnel_and_open_browser(&self, serial: &str, port: u16) -> Result<()> {
+        self.setup_reverse_tunnel(serial, port)?;
 
         // Open default browser pointing to the local USB tunnel
         let url = format!("http://127.0.0.1:{}", port);

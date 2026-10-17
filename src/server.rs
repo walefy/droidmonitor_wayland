@@ -14,6 +14,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 use tokio::sync::{broadcast, watch, Semaphore};
 
 const CLIENT_HTML: &str = include_str!("client.html");
@@ -86,6 +87,15 @@ async fn ws_handler(
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
+    struct ActiveConnGuard(Arc<crate::capture::ClientDiagnostics>);
+    impl Drop for ActiveConnGuard {
+        fn drop(&mut self) {
+            self.0.active_connections.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+    state.diagnostics.active_connections.fetch_add(1, Ordering::Relaxed);
+    let _conn_guard = ActiveConnGuard(state.diagnostics.clone());
+
     let (mut sender, mut receiver) = socket.split();
     let mut packet_rx = state.packet_tx.subscribe();
     let latest_keyframe = state.latest_keyframe.clone();
@@ -149,28 +159,39 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     });
 
-    while let Some(Ok(msg)) = receiver.next().await {
-        if let Message::Binary(data) = msg {
-            if !data.is_empty() && data[0] == 0xFF {
-                diag_recv.acks_received.fetch_add(1, Ordering::Relaxed);
-                if data.len() >= 4 {
-                    diag_recv.decode_ms.store(data[1] as u32, Ordering::Relaxed);
-                    diag_recv.client_fps.store(data[2] as u32, Ordering::Relaxed);
-                    diag_recv.queue_len.store(data[3] as u32, Ordering::Relaxed);
-                }
-                if in_flight_ack.available_permits() < MAX_IN_FLIGHT_FRAMES {
-                    in_flight_ack.add_permits(1);
-                }
-            } else if data.len() >= 6 {
-                let action_byte = data[0];
-                let slot = data[1];
-                let x = u16::from_le_bytes([data[2], data[3]]);
-                let y = u16::from_le_bytes([data[4], data[5]]);
-                if let Some(action) = TouchAction::from_u8(action_byte) {
-                    if let Ok(mut dev) = touch_dev.lock() {
-                        let _ = dev.handle_touch_event(action, slot, x, y);
+    loop {
+        let msg_res = tokio::time::timeout(Duration::from_millis(2500), receiver.next()).await;
+        match msg_res {
+            Ok(Some(Ok(msg))) => {
+                if let Message::Binary(data) = msg {
+                    if !data.is_empty() && data[0] == 0xFF {
+                        diag_recv.acks_received.fetch_add(1, Ordering::Relaxed);
+                        if data.len() >= 4 {
+                            diag_recv.decode_ms.store(data[1] as u32, Ordering::Relaxed);
+                            diag_recv.client_fps.store(data[2] as u32, Ordering::Relaxed);
+                            diag_recv.queue_len.store(data[3] as u32, Ordering::Relaxed);
+                        }
+                        if in_flight_ack.available_permits() < MAX_IN_FLIGHT_FRAMES {
+                            in_flight_ack.add_permits(1);
+                        }
+                    } else if data.len() >= 6 {
+                        let action_byte = data[0];
+                        let slot = data[1];
+                        let x = u16::from_le_bytes([data[2], data[3]]);
+                        let y = u16::from_le_bytes([data[4], data[5]]);
+                        if let Some(action) = TouchAction::from_u8(action_byte) {
+                            if let Ok(mut dev) = touch_dev.lock() {
+                                let _ = dev.handle_touch_event(action, slot, x, y);
+                            }
+                        }
                     }
                 }
+            }
+            Ok(Some(Err(_))) | Ok(None) => break,
+            Err(_) => {
+                // Heartbeat timeout: no data/heartbeat from client for 2.5s.
+                // Cleanly close this socket so new connections can take over.
+                break;
             }
         }
     }
